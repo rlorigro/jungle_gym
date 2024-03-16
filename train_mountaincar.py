@@ -165,6 +165,7 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
     if step:
         optimizer.step()
         optimizer.zero_grad()
+        history.set_new_goal()
 
     # Save and initialize episode history counters
     history.loss_history.append(loss.data.item())
@@ -202,9 +203,6 @@ def train(id, output_directory, policy, env_name, render=False):
         time = 0
         done = False
 
-        max_pos = -float(sys.maxsize)
-        max_velocity = -float(sys.maxsize)
-
         truncated = True
         terminated = False
 
@@ -224,19 +222,18 @@ def train(id, output_directory, policy, env_name, render=False):
             velocity = state[1]
 
             # OVERRIDE terminated FOR EASIER GOAL
-            terminated = (pos > -0.25)
 
-            if pos > max_pos:
-                max_pos = pos
-                i_max_pos = time
+            # position is clipped to the range [-1.2, 0.6]
+            # starting [-0.6 , -0.4]
+            # use history for goal post
 
-            if velocity > max_velocity:
-                max_velocity = velocity
-
+            terminated = (pos > history.get_pos_goal())
             # Save reward
             history.reward_episode.append(reward)
 
             if terminated or truncated:
+                history.n_episodes += 1
+                history.set_pos_record(pos)
                 if id == 0:
                     print(e, time, n_success, "max pos: %.3f" % max_pos, "max vel: %.3f" % max_velocity, terminated)
 
@@ -244,7 +241,16 @@ def train(id, output_directory, policy, env_name, render=False):
 
         if terminated:
             n_success += 1
-            update_policy(policy=policy, optimizer=optimizer, history=history, axes=axes, step=(n_success%25==0), plot=((n_success%50==0) and (id==0)))
+            step = (n_success % batch_size == 0)
+
+            update_policy(policy=policy, optimizer=optimizer, history=history, axes=axes, step=step, plot=((n_success%50==0) and (id==0)))
+
+            if id == 0:
+                axes[4].plot(history.time_record[-1], history.get_pos_record(), marker='o', color="C0")
+                axes[5].plot(history.episode_record[-1], history.get_pos_record(), marker='o', color="C0")
+                plt.show()
+                plt.pause(1e-10)
+
         else:
             history.reset_episode()
 
