@@ -7,11 +7,13 @@ from models.PolicyGradient import Policy, History
 from torch.distributions import Categorical
 import torch.optim as optim
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 from datetime import datetime
 import pandas as pd
 import numpy as np
 import torch
 import gymnasium as gym
+import time
 import sys
 import os
 
@@ -185,6 +187,7 @@ def train(id, output_directory, policy, env_name, render=False):
     # Hyperparameters
     n_episodes = 15000
     learning_rate = 1e-4
+    batch_size = 25
 
     optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
     # optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -192,22 +195,32 @@ def train(id, output_directory, policy, env_name, render=False):
     environment = gym.make(env_name) #, render_mode="human")
 
     # Rows correspond to reward, action, state
-    fig, axes = plt.subplots(nrows=4, height_ratios=[1, 1, 1, 3])
+    fig = plt.figure(layout="tight")
+    gs = GridSpec(nrows=4, ncols=6, figure=fig)
+    axes = list()
+    axes.append(fig.add_subplot(gs[0,0:3]))   # 0
+    axes.append(fig.add_subplot(gs[1,0:3]))   # 1
+    axes.append(fig.add_subplot(gs[2,0:3]))   # 2
+    axes.append(fig.add_subplot(gs[3:,0:3]))  # 3
+    axes.append(fig.add_subplot(gs[:2,3:]))    # 4
+    axes.append(fig.add_subplot(gs[2:,3:]))    # 5
+
     plt.ion()
+    plt.show()
 
     n_success = 0
 
     for e in range(n_episodes):
         state, info = environment.reset()  # Reset environment and record the starting state
 
-        time = 0
         done = False
 
         truncated = True
         terminated = False
+        t = 0
 
         # run a simulation for up to 1000 time steps
-        for time in range(400):
+        for t in range(400):
             if render:
                 environment.render()
 
@@ -229,13 +242,14 @@ def train(id, output_directory, policy, env_name, render=False):
 
             terminated = (pos > history.get_pos_goal())
             # Save reward
+
             history.reward_episode.append(reward)
 
             if terminated or truncated:
                 history.n_episodes += 1
                 history.set_pos_record(pos)
                 if id == 0:
-                    print(e, time, n_success, "max pos: %.3f" % max_pos, "max vel: %.3f" % max_velocity, terminated)
+                    print(history.n_episodes, t, n_success, "max pos: %.3f" % history.get_pos_record(), "goal post: %.3f" % history.get_pos_goal(), terminated)
 
                 break
 
@@ -257,7 +271,7 @@ def train(id, output_directory, policy, env_name, render=False):
         if e % 4000 == 0:
             # plt.show()
             # plt.close()
-            print('Episode {}\tLast length: {:5d}'.format(e, time))
+            print('Episode {}\tLast length: {:5d}'.format(e, t))
 
             save_model(id=id, output_directory=output_directory, model=policy)
 
@@ -344,7 +358,7 @@ def run():
     observation_space = environment.observation_space
     action_space = environment.action_space
 
-    n_processes = 32
+    n_processes = 1
 
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
     policy.share_memory()

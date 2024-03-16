@@ -1,5 +1,6 @@
 import random
 
+import time
 import torch
 import math
 import torch.nn as nn
@@ -17,6 +18,10 @@ class History:
         self.action_episode = None
         self.policy_episode = None
         self.reward_episode = None
+
+        self.start_time = time.time()
+        self.n_episodes = 0
+
         #self.state_average
         # |---------|
         # |  |   |  |
