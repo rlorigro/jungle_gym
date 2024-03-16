@@ -1,4 +1,5 @@
 import multiprocessing
+import random
 
 import torch.multiprocessing as mp
 from handlers.FileManager import FileManager
@@ -61,7 +62,35 @@ def plot_results(n_episodes, history: History):
     fig.tight_layout(pad=2)
     plt.show()
 
+
+
+
     # fig.savefig('results.png')
+
+
+def compute_mean(array):
+    array_size = array.shape
+    dim_x = array_size[0]
+    dim_y = array_size[1]
+
+    return_array = np.zeros((dim_x,dim_y))
+    for i in range(dim_x):
+        for j in range(dim_y):
+            count_0 = array[i][j][0]
+            count_1 = array[i][j][1]
+            count_2 = array[i][j][2]
+
+            total_count = count_0+count_1+count_2
+
+            total_sum = count_1 + count_2*2
+
+            if total_count == 0:
+                total_count = 1
+
+            mean = total_sum/total_count
+
+            return_array[i][j] = mean
+    return return_array
 
 
 def update_policy(policy: Policy, optimizer, history: History, step: bool, axes, plot: bool):
@@ -97,10 +126,18 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
     # Calculate loss
     loss = torch.sum(torch.mul(policy_episode, rewards).mul(-1), dim=-1)
 
-    # print(loss)
+    # if history.policy_cache is not None and len(history.policy_cache) > 0:
+    #     replay_policy = torch.stack(history.policy_cache)
+    #     reward_cache = torch.stack(history.reward_cache)
+    #     replay_loss = torch.sum(torch.mul(replay_policy, reward_cache).mul(-1), dim=-1)
+    #     replay_loss.backward(retain_graph=True)
+    #     print(replay_loss)
+    #
+    # history.update_cache(rewards_episode=rewards, policy_episode=policy_episode)
+
+    print(loss)
 
     # print(policy_history)
-
     # print(p.shape)
 
     if plot:
@@ -109,6 +146,10 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
         axes[2].plot([x[0] for x in history.state_episode])
         axes[2].plot([x[1] for x in history.state_episode])
 
+        arrayB = compute_mean(history.action_history)
+        a = np.diag(range(15))
+        axes[3].matshow(arrayB)
+        history.reset_action_history()
         plt.show()
         plt.pause(1e-10)
         axes[0].cla()
@@ -118,11 +159,12 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
     # sys.stdin.readline()
 
     # Update network weights
-    optimizer.zero_grad()
+
     loss.backward()
 
     if step:
         optimizer.step()
+        optimizer.zero_grad()
 
     # Save and initialize episode history counters
     history.loss_history.append(loss.data.item())
@@ -140,7 +182,7 @@ def train(id, output_directory, policy, env_name, render=False):
     history = History()
 
     # Hyperparameters
-    n_episodes = 1500
+    n_episodes = 15000
     learning_rate = 1e-4
 
     optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
@@ -149,7 +191,7 @@ def train(id, output_directory, policy, env_name, render=False):
     environment = gym.make(env_name) #, render_mode="human")
 
     # Rows correspond to reward, action, state
-    fig,axes = plt.subplots(nrows=3)
+    fig, axes = plt.subplots(nrows=4, height_ratios=[1, 1, 1, 3])
     plt.ion()
 
     n_success = 0
@@ -182,7 +224,7 @@ def train(id, output_directory, policy, env_name, render=False):
             velocity = state[1]
 
             # OVERRIDE terminated FOR EASIER GOAL
-            terminated = (pos > -0.35)
+            terminated = (pos > -0.25)
 
             if pos > max_pos:
                 max_pos = pos
@@ -296,7 +338,7 @@ def run():
     observation_space = environment.observation_space
     action_space = environment.action_space
 
-    n_processes = 1
+    n_processes = 32
 
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
     policy.share_memory()
