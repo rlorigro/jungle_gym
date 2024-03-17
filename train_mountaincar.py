@@ -1,21 +1,22 @@
-import multiprocessing
-import random
-
-import torch.multiprocessing as mp
 from handlers.FileManager import FileManager
 from models.PolicyGradient import Policy, History
+
+import torch.multiprocessing as mp
 from torch.distributions import Categorical
 import torch.optim as optim
+import torch
+
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
+import matplotlib
+
 from datetime import datetime
+import time
+import os
+
+import gymnasium as gym
 import pandas as pd
 import numpy as np
-import torch
-import gymnasium as gym
-import time
-import sys
-import os
 
 
 def get_timestamp_string():
@@ -89,33 +90,26 @@ def compute_mean(array):
             if total_count == 0:
                 total_count = 1
 
+            if total_sum == 0:
+                total_sum = 1
+
             mean = total_sum/total_count
 
             return_array[i][j] = mean
     return return_array
 
 
-def update_policy(policy: Policy, optimizer, history: History, step: bool, axes, plot: bool):
+def update_policy(policy: Policy, optimizer, history: History, step: bool):
     R = 0
     rewards = []
-
-    # print("len of reward episode", len(policy.reward_episode))
-
-    # print(policy.reward_episode)
-
-    # print(len(policy.reward_episode))
 
     # Discount future rewards back to the present using gamma
     for r in reversed(history.reward_episode):
         R = r + policy.gamma * R
-        # R = r
         rewards.insert(0, R)
 
     # Scale rewards
     rewards = torch.FloatTensor(rewards)
-
-    # print("rewards")
-    # print(rewards)
 
     # Normalize rewards
     rewards = (rewards - rewards.mean()) / (rewards.std() + float(np.finfo(np.float32).eps))
@@ -137,31 +131,7 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
     #
     # history.update_cache(rewards_episode=rewards, policy_episode=policy_episode)
 
-    print(loss)
-
-    # print(policy_history)
-    # print(p.shape)
-
-    if plot:
-        axes[0].plot(torch.exp(rewards.data))
-        axes[1].plot(history.action_episode)
-        axes[2].plot([x[0] for x in history.state_episode])
-        axes[2].plot([x[1] for x in history.state_episode])
-
-        arrayB = compute_mean(history.action_history)
-        a = np.diag(range(15))
-        axes[3].matshow(arrayB)
-        history.reset_action_history()
-        plt.show()
-        plt.pause(1e-10)
-        axes[0].cla()
-        axes[1].cla()
-        axes[2].cla()
-
-    # sys.stdin.readline()
-
     # Update network weights
-
     loss.backward()
 
     if step:
@@ -174,20 +144,79 @@ def update_policy(policy: Policy, optimizer, history: History, step: bool, axes,
     history.reward_history.append(np.sum(history.reward_episode))
     history.reset_episode()
 
-    # if e % 50 == 0:
-    #     plt.plot(rewards.data.numpy())
-    #     # print(loss.data.numpy())
-    #     plt.show()
-    #     plt.close()
+
+def initialize_plot():
+    fig = plt.figure(layout="tight", figsize=[12,9])
+    gs = GridSpec(nrows=4, ncols=12, figure=fig)
+
+    axes = list()
+
+    axes.append(fig.add_subplot(gs[0,0:6]))   # 0
+    axes[-1].set_ylabel("Episode actions")
+
+    axes.append(fig.add_subplot(gs[1,0:6]))   # 1
+    axes[-1].set_ylabel("Episode states")
+
+    axes.append(fig.add_subplot(gs[2:,0:5]))  # 2
+    axes[-1].set_xlabel("Velocity")
+    axes[-1].set_ylabel("Position")
+
+    axes.append(fig.add_subplot(gs[:2,7:]))    # 3
+    axes[-1].set_xlabel("Time (s)")
+    axes[-1].set_ylabel("Max observed position")
+
+    axes.append(fig.add_subplot(gs[2:,7:]))    # 4
+    axes[-1].set_xlabel("Episode")
+    axes[-1].set_ylabel("Max observed position")
+
+    plt.ion()
+
+    return fig,axes
+
+
+def update_plot(fig, axes, history, e, n_steps, start_time):
+    # Clear and re-label axes 0
+    for artist in axes[0].lines + axes[0].collections:
+        artist.remove()
+
+    for artist in axes[1].lines + axes[1].collections:
+        artist.remove()
+
+    axes[0].plot(history.action_episode, color="C0")
+    axes[0].relim()
+
+    axes[1].plot([x[0] for x in history.state_episode], color="C0")
+    axes[1].plot([x[1] for x in history.state_episode], color="C1")
+    axes[1].relim()
+
+    arrayB = compute_mean(history.action_history)
+    m = axes[2].matshow(arrayB, vmin=0, vmax=2, cmap=matplotlib.colormaps["seismic"])
+    axes[2].xaxis.set_ticks_position('bottom')
+
+    # add colorbar if it doesn't exist already
+    if n_steps == 1:
+        fig.colorbar(m, ax=axes[2])
+
+    elapsed = time.time() - start_time
+    axes[3].plot(elapsed, history.get_pos_record(), marker='o', color="C0")
+    axes[4].plot(e, history.get_pos_record(), marker='o', color="C0")
+
+    plt.show()
+    plt.pause(1e-10)
+    plt.savefig("mountaincar_progress_%d.png" % e, dpi=200)
+    history.reset_action_history()
 
 
 def train(id, output_directory, policy, env_name, render=False):
     history = History()
+    start_time = time.time()
+
+    fig, axes = initialize_plot()
 
     # Hyperparameters
-    n_episodes = 15000
+    n_episodes = 80000
     learning_rate = 1e-4
-    batch_size = 25
+    batch_size = 16
 
     optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
     # optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -195,20 +224,9 @@ def train(id, output_directory, policy, env_name, render=False):
     environment = gym.make(env_name) #, render_mode="human")
 
     # Rows correspond to reward, action, state
-    fig = plt.figure(layout="tight")
-    gs = GridSpec(nrows=4, ncols=6, figure=fig)
-    axes = list()
-    axes.append(fig.add_subplot(gs[0,0:3]))   # 0
-    axes.append(fig.add_subplot(gs[1,0:3]))   # 1
-    axes.append(fig.add_subplot(gs[2,0:3]))   # 2
-    axes.append(fig.add_subplot(gs[3:,0:3]))  # 3
-    axes.append(fig.add_subplot(gs[:2,3:]))    # 4
-    axes.append(fig.add_subplot(gs[2:,3:]))    # 5
-
-    plt.ion()
-    plt.show()
 
     n_success = 0
+    n_steps = 0
 
     for e in range(n_episodes):
         state, info = environment.reset()  # Reset environment and record the starting state
@@ -224,32 +242,23 @@ def train(id, output_directory, policy, env_name, render=False):
             if render:
                 environment.render()
 
-            # print("TIME: ", time)
             action = select_action(policy=policy, state=state, history=history)
 
             state, reward, terminated, truncated, info = environment.step(action)
-            # print("reward", reward)
-            # print(state)
 
-            pos = state[0]
-            velocity = state[1]
-
-            # OVERRIDE terminated FOR EASIER GOAL
-
+            pos,velocity = state
             # position is clipped to the range [-1.2, 0.6]
             # starting [-0.6 , -0.4]
             # use history for goal post
-
             terminated = (pos > history.get_pos_goal())
-            # Save reward
+            # terminated = (pos > -0.3)
 
             history.reward_episode.append(reward)
 
             if terminated or truncated:
-                history.n_episodes += 1
                 history.set_pos_record(pos)
                 if id == 0:
-                    print(history.n_episodes, t, n_success, "max pos: %.3f" % history.get_pos_record(), "goal post: %.3f" % history.get_pos_goal(), terminated)
+                    print(e, t, n_success, "max pos: %.3f" % history.get_pos_record(), "goal post: %.3f" % history.get_pos_goal(), terminated)
 
                 break
 
@@ -257,13 +266,12 @@ def train(id, output_directory, policy, env_name, render=False):
             n_success += 1
             step = (n_success % batch_size == 0)
 
-            update_policy(policy=policy, optimizer=optimizer, history=history, axes=axes, step=step, plot=((n_success%50==0) and (id==0)))
+            n_steps += step
 
-            if id == 0:
-                axes[4].plot(history.time_record[-1], history.get_pos_record(), marker='o', color="C0")
-                axes[5].plot(history.episode_record[-1], history.get_pos_record(), marker='o', color="C0")
-                plt.show()
-                plt.pause(1e-10)
+            if id == 0 and step:
+                update_plot(fig=fig, axes=axes, history=history, e=e, n_steps=n_steps, start_time=start_time)
+
+            update_policy(policy=policy, optimizer=optimizer, history=history, step=step)
 
         else:
             history.reset_episode()
@@ -358,7 +366,7 @@ def run():
     observation_space = environment.observation_space
     action_space = environment.action_space
 
-    n_processes = 1
+    n_processes = 16
 
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
     policy.share_memory()

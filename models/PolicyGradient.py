@@ -19,9 +19,6 @@ class History:
         self.policy_episode = None
         self.reward_episode = None
 
-        self.start_time = time.time()
-        self.n_episodes = 0
-
         #self.state_average
         # |---------|
         # |  |   |  |
@@ -48,12 +45,9 @@ class History:
         self.position_goal = -0.2
         self.record_delim = 0.05
 
-        self.time_record = list()
-        self.episode_record = list()
-
     def get_pos_record(self):
         if len(self.position_record) == 0:
-            return -0.25
+            return -0.3
         return self.position_record[-1]
 
     def get_pos_goal(self):
@@ -66,16 +60,12 @@ class History:
 
         if len(self.position_record) == 0:
             self.position_record.append(position_value)
-            self.time_record.append(time.time() - self.start_time)
-            self.episode_record.append(self.n_episodes)
 
             return position_value
 
         last_record = self.position_record[-1]
         if position_value > self.position_record[-1]:
             self.position_record.append(position_value)
-            self.time_record.append(time.time() - self.start_time)
-            self.episode_record.append(self.n_episodes)
         return last_record
 
     def update_cache(self, rewards_episode, policy_episode):
@@ -105,8 +95,6 @@ class History:
         self.action_history = np.zeros((int(count_c), int(count_v), 3))  # third dimension  position represents a count for the action
 
     def capture_actions(self):
-        # print("what the fuck is this ", self.action_episode)
-        # [array([-0.56473184, 0.], dtype=float32), array([-0.5634241, 0.00130772]
         if self.state_episode is None or self.action_episode is None :
             return
 
@@ -117,9 +105,6 @@ class History:
             pos_p = int(round(pos_p,2))
             pos_v = int(round(pos_v,3))
             self.action_history[pos_p][pos_v][action] += 1
-            """    self.action_history[pos_p][pos_v][action] += 1
-    ~~~~~~~~~~~~~~~~~~~^^^^^^^
-IndexError: only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) and integer or boolean arrays are valid indices"""
 
     def reset_episode(self):
         # Episode policy and reward history
