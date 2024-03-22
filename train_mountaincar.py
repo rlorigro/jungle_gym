@@ -19,6 +19,9 @@ import pandas as pd
 import numpy as np
 
 
+matplotlib.use('Agg')
+
+
 def get_timestamp_string():
     time = datetime.now()
     year_to_second = [time.year, time.month, time.day, time.hour, time.second]
@@ -169,7 +172,7 @@ def initialize_plot():
     axes[-1].set_xlabel("Episode")
     axes[-1].set_ylabel("Max observed position")
 
-    plt.ion()
+    # plt.ion()
 
     return fig,axes
 
@@ -214,7 +217,7 @@ def train(id, output_directory, policy, env_name, render=False):
     fig, axes = initialize_plot()
 
     # Hyperparameters
-    n_episodes = 80000
+    n_episodes = 6400000
     learning_rate = 1e-4
     batch_size = 16
 
@@ -283,7 +286,7 @@ def train(id, output_directory, policy, env_name, render=False):
 
             save_model(id=id, output_directory=output_directory, model=policy)
 
-    plt.ioff()
+    # plt.ioff()
 
     if id == 0:
         plot_results(n_episodes=n_episodes, history=history)
@@ -366,7 +369,7 @@ def run():
     observation_space = environment.observation_space
     action_space = environment.action_space
 
-    n_processes = 16
+    n_processes = 8
 
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
     policy.share_memory()
