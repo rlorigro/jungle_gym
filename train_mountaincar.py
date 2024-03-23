@@ -350,7 +350,7 @@ def run(model_path, pos_goal):
 
     processes = list()
     for r in range(n_processes):
-        p = mp.Process(target=train, args=(r, output_directory, policy, env_name))
+        p = mp.Process(target=train, args=(r, output_directory, policy, env_name, pos_goal))
         p.start()
         processes.append(p)
 
@@ -368,4 +368,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    run(args.model_path, args.pos_goal)
+    run(model_path=args.model_path, pos_goal=args.pos_goal)
