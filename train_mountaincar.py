@@ -1,5 +1,5 @@
 from handlers.FileManager import FileManager
-from models.PolicyGradient import Policy, History
+from models.PolicyGradient import Policy, History, Categorical2
 
 import torch.multiprocessing as mp
 from torch.distributions import Categorical
@@ -17,7 +17,7 @@ import os
 import gymnasium as gym
 import pandas as pd
 import numpy as np
-
+import argparse
 
 matplotlib.use('Agg')
 
@@ -210,14 +210,17 @@ def update_plot(fig, axes, history, e, n_steps, start_time):
     history.reset_action_history()
 
 
-def train(id, output_directory, policy, env_name, render=False):
+def train(id, output_directory, policy, env_name, pos_goal):
     history = History()
+    history.set_pos_record(pos_goal)
+    history.set_new_goal()
+
     start_time = time.time()
 
     fig, axes = initialize_plot()
 
     # Hyperparameters
-    n_episodes = 6400000
+    n_episodes = 10_000_000
     learning_rate = 1e-4
     batch_size = 16
 
@@ -225,6 +228,8 @@ def train(id, output_directory, policy, env_name, render=False):
     # optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     environment = gym.make(env_name) #, render_mode="human")
+
+    categorical = Categorical2([policy.ouput_size])
 
     # Rows correspond to reward, action, state
 
@@ -240,12 +245,8 @@ def train(id, output_directory, policy, env_name, render=False):
         terminated = False
         t = 0
 
-        # run a simulation for up to 1000 time steps
         for t in range(400):
-            if render:
-                environment.render()
-
-            action = select_action(policy=policy, state=state, history=history)
+            action = select_action(policy=policy, state=state, history=history, categorical=categorical)
 
             state, reward, terminated, truncated, info = environment.step(action)
 
@@ -253,11 +254,13 @@ def train(id, output_directory, policy, env_name, render=False):
             # position is clipped to the range [-1.2, 0.6]
             # starting [-0.6 , -0.4]
             # use history for goal post
+
             terminated = (pos > history.get_pos_goal())
             # terminated = (pos > -0.3)
 
             history.reward_episode.append(reward)
 
+            # TODO: fix pos record setting
             if terminated or truncated:
                 history.set_pos_record(pos)
                 if id == 0:
@@ -292,7 +295,7 @@ def train(id, output_directory, policy, env_name, render=False):
         plot_results(n_episodes=n_episodes, history=history)
 
 
-def select_action(policy, state, history: History):
+def select_action(policy, state, history: History, categorical: Categorical2):
     # print("ACTION SELECTION")
 
     # print(state, type(state))
@@ -304,13 +307,13 @@ def select_action(policy, state, history: History):
     # print(action_state)
 
     # Sample based on the output probabilities of the model
-    choice_distribution = Categorical(action_state)
-    action = choice_distribution.sample()
+    categorical.set_probs(action_state)
+    action = categorical.sample()
     # print(choice_distribution)
     # print(action)
 
     # Add log probability of our chosen action to history
-    action_probability = choice_distribution.log_prob(action)
+    action_probability = categorical.log_prob(action)
     history.policy_episode.append(action_probability)
     history.action_episode.append(int(action.data.item()))
     history.state_episode.append(state.numpy())
@@ -321,48 +324,15 @@ def select_action(policy, state, history: History):
     return action.item()
 
 
-def test(policy, environment, render=False):
-    history = History()
-
-    while True:
-        state, info = environment.reset()  # Reset environment and record the starting state
-
-        # run a simulation for up to 1000 time steps
-        for time in range(1000):
-            if render:
-                environment.render()
-
-            # print("TIME: ", time)
-            action = select_action(policy=policy, state=state, history=history)
-
-            state, reward, terminated, truncated, info = environment.step(action)
-
-            # Save reward
-            history.reward_episode.append(reward)
-
-            if terminated or truncated:
-                print(time)
-                environment.reset()
-                break
-
-
-def run():
+def run(model_path, pos_goal):
     render = False
 
     output_directory = "output"
-
-    # gym.envs.register(
-    #     id='CartPole-v666',
-    #     entry_point='gym.envs.classic_control:CartPoleEnv',
-    #     max_episode_steps=5000,
-    #     reward_threshold=5000.0
-    # )
 
     env_name = "MountainCar-v0"
     gamma = 0.99
 
     # Initialize environment
-
     environment = gym.make(env_name) #, render_mode="human")
 
     # Access environment/agent variables
@@ -372,26 +342,30 @@ def run():
     n_processes = 8
 
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
+
+    if model_path is not None:
+        policy.load_state_dict(torch.load(model_path))
+
     policy.share_memory()
 
     processes = list()
     for r in range(n_processes):
-        p = mp.Process(target=train, args=(r, output_directory, policy, env_name, render))
+        p = mp.Process(target=train, args=(r, output_directory, policy, env_name))
         p.start()
         processes.append(p)
 
     for p in processes:
         p.join()
 
-    # train(output_directory=output_directory, environment=environment, policy=policy, render=render)
-
     policy.eval()
-
-    environment = gym.make(env_name)
-    # environment = gym.make(env_name, render_mode="human")
-
-    test(policy, environment, True)
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--pos_goal", type=float, required=False, default=None)
+    parser.add_argument("--model_path", type=str, required=False, default=None)
+
+    args = parser.parse_args()
+
+    run(args.model_path, args.pos_goal)
