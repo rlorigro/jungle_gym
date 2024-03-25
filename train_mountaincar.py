@@ -211,8 +211,10 @@ def update_plot(fig, axes, history, e, n_steps, start_time, output_dir):
 
 def train(id, output_directory, policy, env_name, pos_goal):
     history = History()
-    history.set_pos_record(pos_goal)
-    history.set_new_goal()
+
+    if pos_goal is not None:
+        history.set_pos_record(pos_goal)
+        history.set_new_goal()
 
     start_time = time.time()
 
