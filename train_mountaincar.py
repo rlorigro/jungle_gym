@@ -274,7 +274,7 @@ def train(id, output_directory, policy, env_name, pos_goal):
             n_steps += step
 
             if id == 0 and step:
-                update_plot(fig=fig, axes=axes, history=history, e=e, n_steps=n_steps, start_time=start_time)
+                update_plot(fig=fig, axes=axes, history=history, e=e, n_steps=n_steps, start_time=start_time, output_dir=output_directory)
 
             update_policy(policy=policy, optimizer=optimizer, history=history, step=step)
 
