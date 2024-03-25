@@ -31,11 +31,11 @@ def get_timestamp_string():
     return time_string
 
 
-def save_model(output_directory, model, id):
+def save_model(output_directory, model, episode):
     FileManager.ensure_directory_exists(output_directory)
 
     timestamp = get_timestamp_string()
-    filename = "model_" + str(id) + "_" + timestamp
+    filename = "model_" + str(episode) + "_" + timestamp
     path = os.path.join(output_directory, filename)
 
     print("SAVING MODEL:", path)
@@ -177,7 +177,7 @@ def initialize_plot():
     return fig,axes
 
 
-def update_plot(fig, axes, history, e, n_steps, start_time):
+def update_plot(fig, axes, history, e, n_steps, start_time, output_dir):
     # Clear and re-label axes 0
     for artist in axes[0].lines + axes[0].collections:
         artist.remove()
@@ -204,9 +204,8 @@ def update_plot(fig, axes, history, e, n_steps, start_time):
     axes[3].plot(elapsed, history.get_pos_record(), marker='o', color="C0")
     axes[4].plot(e, history.get_pos_record(), marker='o', color="C0")
 
-    plt.show()
-    plt.pause(1e-10)
-    plt.savefig("mountaincar_progress_%d.png" % e, dpi=200)
+    output_path = os.path.join(output_dir, "mountaincar_progress_%d.png" % e)
+    plt.savefig(output_path, dpi=200)
     history.reset_action_history()
 
 
@@ -238,8 +237,6 @@ def train(id, output_directory, policy, env_name, pos_goal):
 
     for e in range(n_episodes):
         state, info = environment.reset()  # Reset environment and record the starting state
-
-        done = False
 
         truncated = True
         terminated = False
@@ -282,17 +279,12 @@ def train(id, output_directory, policy, env_name, pos_goal):
         else:
             history.reset_episode()
 
-        if e % 4000 == 0:
+        if e % 10_000 == 0 and id == 0:
             # plt.show()
             # plt.close()
             print('Episode {}\tLast length: {:5d}'.format(e, t))
 
-            save_model(id=id, output_directory=output_directory, model=policy)
-
-    # plt.ioff()
-
-    if id == 0:
-        plot_results(n_episodes=n_episodes, history=history)
+            save_model(episode=e, output_directory=output_directory, model=policy)
 
 
 def select_action(policy, state, history: History, categorical: Categorical2):
@@ -324,10 +316,11 @@ def select_action(policy, state, history: History, categorical: Categorical2):
     return action.item()
 
 
-def run(model_path, pos_goal):
-    render = False
-
-    output_directory = "output"
+def run(model_path, pos_goal, output_dir, n_threads):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    else:
+        exit("ERROR: output dir already exists: " + output_dir)
 
     env_name = "MountainCar-v0"
     gamma = 0.99
@@ -339,8 +332,6 @@ def run(model_path, pos_goal):
     observation_space = environment.observation_space
     action_space = environment.action_space
 
-    n_processes = 8
-
     policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
 
     if model_path is not None:
@@ -349,8 +340,8 @@ def run(model_path, pos_goal):
     policy.share_memory()
 
     processes = list()
-    for r in range(n_processes):
-        p = mp.Process(target=train, args=(r, output_directory, policy, env_name, pos_goal))
+    for r in range(n_threads):
+        p = mp.Process(target=train, args=(r, output_dir, policy, env_name, pos_goal))
         p.start()
         processes.append(p)
 
@@ -365,7 +356,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--pos_goal", type=float, required=False, default=None)
     parser.add_argument("--model_path", type=str, required=False, default=None)
+    parser.add_argument("--output_dir", type=str, required=False, default=None)
+    parser.add_argument("--n_threads", type=int, required=False, default=None)
 
     args = parser.parse_args()
 
-    run(model_path=args.model_path, pos_goal=args.pos_goal)
+    run(model_path=args.model_path, pos_goal=args.pos_goal, output_dir=args.output_dir, n_threads=args.n_threads)
