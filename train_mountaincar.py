@@ -1,3 +1,5 @@
+import ctypes
+
 from handlers.FileManager import FileManager
 from models.PolicyGradient import Policy, History, Categorical2
 
@@ -102,50 +104,62 @@ def compute_mean(array):
     return return_array
 
 
-def update_policy(policy: Policy, optimizer, history: History, step: bool):
-    R = 0
-    rewards = []
-
-    # Discount future rewards back to the present using gamma
-    for r in reversed(history.reward_episode):
-        R = r + policy.gamma * R
-        rewards.insert(0, R)
-
-    # Scale rewards
-    rewards = torch.FloatTensor(rewards)
-
-    # Normalize rewards
-    rewards = (rewards - rewards.mean()) / (rewards.std() + float(np.finfo(np.float32).eps))
-
-    # print(rewards)
-
-    # Convert to one big torch tensor for the whole episode
-    policy_episode = torch.stack(history.policy_episode)
-
-    # Calculate loss
-    loss = torch.sum(torch.mul(policy_episode, rewards).mul(-1), dim=-1)
-
-    # if history.policy_cache is not None and len(history.policy_cache) > 0:
-    #     replay_policy = torch.stack(history.policy_cache)
-    #     reward_cache = torch.stack(history.reward_cache)
-    #     replay_loss = torch.sum(torch.mul(replay_policy, reward_cache).mul(-1), dim=-1)
-    #     replay_loss.backward(retain_graph=True)
-    #     print(replay_loss)
+def update_policy(policy: Policy, optimizer, queue, batch_size):
+    # - Pack -
+    # rewards = [r1, r2, r3, r4]
+    # policies = [a1, a2, a3, a4]
+    # item = zip(policies,rewards)
     #
-    # history.update_cache(rewards_episode=rewards, policy_episode=policy_episode)
+    # - Unpack -
+    # queue item = [(r1,a1), (r2,a2), (r4,a3), (r4,a4)]
+    # rewards,policies = zip(*item)
 
-    # Update network weights
-    loss.backward()
+    for i in batch_size:
+        R = 0
+        rewards = []
 
-    if step:
-        optimizer.step()
-        optimizer.zero_grad()
-        history.set_new_goal()
+        item = queue.get()
+        policies_e,rewards_e = zip(*item)
+
+        # Discount future rewards back to the present using gamma
+        for r in reversed(rewards_e):
+            R = r + policy.gamma * R
+            rewards.insert(0, R)
+
+        # Scale rewards
+        rewards = torch.FloatTensor(rewards)
+
+        # Normalize rewards
+        rewards = (rewards - rewards.mean()) / (rewards.std() + float(np.finfo(np.float32).eps))
+
+        # print(rewards)
+
+        # Convert to one big torch tensor for the whole episode
+        policy_episode = torch.stack(policies_e)
+
+        # Calculate loss
+        loss = torch.sum(torch.mul(policy_episode, rewards).mul(-1), dim=-1)
+
+        # if history.policy_cache is not None and len(history.policy_cache) > 0:
+        #     replay_policy = torch.stack(history.policy_cache)
+        #     reward_cache = torch.stack(history.reward_cache)
+        #     replay_loss = torch.sum(torch.mul(replay_policy, reward_cache).mul(-1), dim=-1)
+        #     replay_loss.backward(retain_graph=True)
+        #     print(replay_loss)
+        #
+        # history.update_cache(rewards_episode=rewards, policy_episode=policy_episode)
+
+        # Update network weights
+        loss.backward()
+
+    optimizer.step()
+    optimizer.zero_grad()
+
 
     # Save and initialize episode history counters
-    history.loss_history.append(loss.data.item())
-    history.reward_history.append(np.sum(history.reward_episode))
-    history.reset_episode()
+    #history.loss_history.append(loss.data.item())
+    #history.reward_history.append(np.sum(history.reward_episode))
+    #history.reset_episode()
 
 
 def initialize_plot():
@@ -201,43 +215,23 @@ def update_plot(fig, axes, history, e, n_steps, start_time, output_dir):
         fig.colorbar(m, ax=axes[2])
 
     elapsed = time.time() - start_time
-    axes[3].plot(elapsed, history.get_pos_record(), marker='o', color="C0")
-    axes[4].plot(e, history.get_pos_record(), marker='o', color="C0")
 
     output_path = os.path.join(output_dir, "mountaincar_progress_%d.png" % e)
     plt.savefig(output_path, dpi=200)
     history.reset_action_history()
 
 
-def train(id, output_directory, policy, env_name, pos_goal):
+def producer_function(id, policy, env_name, queue, max_pos, batch_size):
     history = History()
 
-    if pos_goal is not None:
-        history.set_pos_record(pos_goal)
-        history.set_new_goal()
-
-    start_time = time.time()
-
-    fig, axes = initialize_plot()
-
-    # Hyperparameters
-    n_episodes = 10_000_000
-    learning_rate = 1e-4
-    batch_size = 16
-
-    optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
-    # optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-    environment = gym.make(env_name) #, render_mode="human")
+    environment = gym.make(env_name)
 
     categorical = Categorical2([policy.ouput_size])
-
-    # Rows correspond to reward, action, state
 
     n_success = 0
     n_steps = 0
 
-    for e in range(n_episodes):
+    while True:
         state, info = environment.reset()  # Reset environment and record the starting state
 
         truncated = True
@@ -248,23 +242,13 @@ def train(id, output_directory, policy, env_name, pos_goal):
             action = select_action(policy=policy, state=state, history=history, categorical=categorical)
 
             state, reward, terminated, truncated, info = environment.step(action)
-
             pos,velocity = state
-            # position is clipped to the range [-1.2, 0.6]
-            # starting [-0.6 , -0.4]
-            # use history for goal post
 
-            terminated = (pos > history.get_pos_goal())
-            # terminated = (pos > -0.3)
+            terminated = (pos > -0.2)
 
             history.reward_episode.append(reward)
 
-            # TODO: fix pos record setting
             if terminated or truncated:
-                history.set_pos_record(pos)
-                if id == 0:
-                    print(e, t, n_success, "max pos: %.3f" % history.get_pos_record(), "goal post: %.3f" % history.get_pos_goal(), terminated)
-
                 break
 
         if terminated:
@@ -273,20 +257,28 @@ def train(id, output_directory, policy, env_name, pos_goal):
 
             n_steps += step
 
-            if id == 0 and step:
-                update_plot(fig=fig, axes=axes, history=history, e=e, n_steps=n_steps, start_time=start_time, output_dir=output_directory)
+            if pos > max_pos.value:
+                with max_pos.get_lock():
+                    max_pos = pos
+                    print("max_pos: %f" % pos)
 
-            update_policy(policy=policy, optimizer=optimizer, history=history, step=step)
+            queue.put(zip(history.policy_episode, history.reward_episode))
 
         else:
             history.reset_episode()
 
-        if e % 10_000 == 0 and id == 0:
-            # plt.show()
-            # plt.close()
-            print('Episode {}\tLast length: {:5d}'.format(e, t))
 
-            save_model(episode=e, output_directory=output_directory, model=policy)
+def consumer_function(policy, queue, batch_size):
+    start_time = time.time()
+
+    # Hyperparameters
+    learning_rate = 1e-4
+
+    optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
+
+    while True:
+        if len(queue) > batch_size:
+            update_policy(policy, optimizer, queue, batch_size)
 
 
 def select_action(policy, state, history: History, categorical: Categorical2):
@@ -318,14 +310,15 @@ def select_action(policy, state, history: History, categorical: Categorical2):
     return action.item()
 
 
-def run(model_path, pos_goal, output_dir, n_threads):
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    else:
-        exit("ERROR: output dir already exists: " + output_dir)
+def run(model_path, output_dir, n_threads):
+    # if not os.path.exists(output_dir):
+    #     os.makedirs(output_dir)
+    # else:
+    #     exit("ERROR: output dir already exists: " + output_dir)
 
     env_name = "MountainCar-v0"
     gamma = 0.99
+    batch_size = 16
 
     # Initialize environment
     environment = gym.make(env_name) #, render_mode="human")
@@ -341,14 +334,22 @@ def run(model_path, pos_goal, output_dir, n_threads):
 
     policy.share_memory()
 
+    queue = mp.Queue()
+    max_pos = mp.Value(ctypes.c_double)
+    max_pos.value = 0
+
     processes = list()
-    for r in range(n_threads):
-        p = mp.Process(target=train, args=(r, output_dir, policy, env_name, pos_goal))
+    for r in range(n_threads - 1):
+        p = mp.Process(target=producer_function, args=(r, policy, env_name, queue, max_pos, batch_size))
         p.start()
         processes.append(p)
 
+    consumer_process = mp.Process(target=consumer_function, args=(policy, queue, batch_size))
+
     for p in processes:
         p.join()
+
+    consumer_process.join()
 
     policy.eval()
 
@@ -356,11 +357,10 @@ def run(model_path, pos_goal, output_dir, n_threads):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--pos_goal", type=float, required=False, default=None)
     parser.add_argument("--model_path", type=str, required=False, default=None)
-    parser.add_argument("--output_dir", type=str, required=False, default=None)
-    parser.add_argument("--n_threads", type=int, required=False, default=None)
+    parser.add_argument("--output_dir", type=str, required=False, default="output/")
+    parser.add_argument("--n_threads", type=int, required=False, default=8)
 
     args = parser.parse_args()
 
-    run(model_path=args.model_path, pos_goal=args.pos_goal, output_dir=args.output_dir, n_threads=args.n_threads)
+    run(model_path=args.model_path, output_dir=args.output_dir, n_threads=args.n_threads)

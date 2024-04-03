@@ -84,33 +84,6 @@ class History:
         self.reward_cache = list()
         self.max_cache_size = 400
 
-        self.position_record = list()
-        self.position_goal = -0.2
-        self.record_delim = 0.05
-
-    def get_pos_record(self):
-        if len(self.position_record) == 0:
-            return -0.3
-        return self.position_record[-1]
-
-    def get_pos_goal(self):
-        return self.position_goal
-
-    def set_new_goal(self):
-        self.position_goal=self.position_record[-1]
-
-    def set_pos_record(self, position_value):
-
-        if len(self.position_record) == 0:
-            self.position_record.append(position_value)
-
-            return position_value
-
-        last_record = self.position_record[-1]
-        if position_value > self.position_record[-1]:
-            self.position_record.append(position_value)
-        return last_record
-
     def update_cache(self, rewards_episode, policy_episode):
         assert(len(self.reward_cache) == len(self.policy_cache))
         assert(len(rewards_episode) == len(policy_episode))
