@@ -1,12 +1,18 @@
+import os
+import sys
+import numpy
+
 import ctypes
 
 from handlers.FileManager import FileManager
 from models.PolicyGradient import Policy, History, Categorical2
 
-import torch.multiprocessing as mp
 from torch.distributions import Categorical
 import torch.optim as optim
 import torch
+import random
+import torch.distributed.rpc as rpc
+import torch.multiprocessing as mp
 
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -17,112 +23,38 @@ import time
 import os
 
 import gymnasium as gym
-import pandas as pd
 import numpy as np
 import argparse
 
-matplotlib.use('Agg')
+print(torch.__version__)
+print(torch.distributed.is_available())
+print(rpc.is_available())
 
 
-def get_timestamp_string():
-    time = datetime.now()
-    year_to_second = [time.year, time.month, time.day, time.hour, time.second]
+def initialize(rank, world_size):
+    print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
 
-    time_string = "-".join(map(str,year_to_second))
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29500'
 
-    return time_string
+    rpc.init_rpc(
+        "worker_" + str(rank),
+        world_size=world_size,
+        rank=rank)
 
+    print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
 
-def save_model(output_directory, model, episode):
-    FileManager.ensure_directory_exists(output_directory)
-
-    timestamp = get_timestamp_string()
-    filename = "model_" + str(episode) + "_" + timestamp
-    path = os.path.join(output_directory, filename)
-
-    print("SAVING MODEL:", path)
-    torch.save(model.state_dict(), path)
+    if rank != 0:
+        rpc.shutdown()
 
 
-def plot_results(n_episodes, history: History):
-    window = int(n_episodes / 20)
-
-    print(len(history.reward_history))
-    print(history.reward_history)
-
-    fig, ((ax1), (ax2)) = plt.subplots(2, 1, sharey=True, figsize=[9, 9])
-
-    rolling_mean = pd.Series(history.reward_history).rolling(window).mean()
-
-    std = pd.Series(history.reward_history).rolling(window).std()
-
-    ax1.plot(rolling_mean)
-    ax1.fill_between(range(len(history.reward_history)), rolling_mean - std, rolling_mean + std, color='orange', alpha=0.2)
-    ax1.set_title('Episode Length Moving Average ({}-episode window)'.format(window))
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Episode Length')
-
-    ax2.plot(history.reward_history)
-    ax2.set_title('Episode Length')
-    ax2.set_xlabel('Episode')
-    ax2.set_ylabel('Episode Length')
-
-    fig.tight_layout(pad=2)
-    plt.show()
-
-
-
-
-    # fig.savefig('results.png')
-
-
-def compute_mean(array):
-    array_size = array.shape
-    dim_x = array_size[0]
-    dim_y = array_size[1]
-
-    return_array = np.zeros((dim_x,dim_y))
-    for i in range(dim_x):
-        for j in range(dim_y):
-            count_0 = array[i][j][0]
-            count_1 = array[i][j][1]
-            count_2 = array[i][j][2]
-
-            total_count = count_0+count_1+count_2
-
-            total_sum = count_1 + count_2*2
-
-            if total_count == 0:
-                total_count = 1
-
-            if total_sum == 0:
-                total_sum = 1
-
-            mean = total_sum/total_count
-
-            return_array[i][j] = mean
-    return return_array
-
-
-def update_policy(policy: Policy, optimizer, queue, batch_size):
-    # - Pack -
-    # rewards = [r1, r2, r3, r4]
-    # policies = [a1, a2, a3, a4]
-    # item = zip(policies,rewards)
-    #
-    # - Unpack -
-    # queue item = [(r1,a1), (r2,a2), (r4,a3), (r4,a4)]
-    # rewards,policies = zip(*item)
-
-    for i in batch_size:
+def update_policy(policy: Policy, optimizer, batch):
+    for policy_episode,rewards_episode,_ in batch:
         R = 0
         rewards = []
 
-        item = queue.get()
-        policies_e,rewards_e = zip(*item)
-
         # Discount future rewards back to the present using gamma
-        for r in reversed(rewards_e):
+        for r in reversed(rewards_episode):
             R = r + policy.gamma * R
             rewards.insert(0, R)
 
@@ -135,19 +67,10 @@ def update_policy(policy: Policy, optimizer, queue, batch_size):
         # print(rewards)
 
         # Convert to one big torch tensor for the whole episode
-        policy_episode = torch.stack(policies_e)
+        policy_episode = torch.stack(policy_episode)
 
         # Calculate loss
         loss = torch.sum(torch.mul(policy_episode, rewards).mul(-1), dim=-1)
-
-        # if history.policy_cache is not None and len(history.policy_cache) > 0:
-        #     replay_policy = torch.stack(history.policy_cache)
-        #     reward_cache = torch.stack(history.reward_cache)
-        #     replay_loss = torch.sum(torch.mul(replay_policy, reward_cache).mul(-1), dim=-1)
-        #     replay_loss.backward(retain_graph=True)
-        #     print(replay_loss)
-        #
-        # history.update_cache(rewards_episode=rewards, policy_episode=policy_episode)
 
         # Update network weights
         loss.backward()
@@ -156,136 +79,127 @@ def update_policy(policy: Policy, optimizer, queue, batch_size):
     optimizer.zero_grad()
 
 
-    # Save and initialize episode history counters
-    #history.loss_history.append(loss.data.item())
-    #history.reward_history.append(np.sum(history.reward_episode))
-    #history.reset_episode()
+'''
+Fill a list with computed rollouts from environment
+'''
+def fetch_batch(model, futures, environment, max_pos: float, termination_pos: float, batch_size: int, world_size: int):
+    # Reset batch
+    batch = list()
+
+    # Launch async fn calls
+    for i in range(1, world_size):
+        if i in futures:
+            if not futures[i].done():
+                futures[i].set_result(None)
+
+        futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment, max_pos, termination_pos), timeout=0)
+
+    # Check repeatedly for completion of async calls and relaunch any completed ones until batch is full
+    done = False
+    while not done:
+        for i, future in futures.items():
+            if not future.done():
+                continue
+
+            else:
+                batch.append(future.value())
+
+                observed_max_pos = future.value()[2]
+
+                if observed_max_pos > max_pos:
+                    max_pos = observed_max_pos
+                    print("Max pos is %.3f on thread %d" % (observed_max_pos, i))
+
+                if len(batch) < batch_size:
+                    futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment, max_pos, termination_pos), timeout=0)
+                else:
+                    done = True
+                    break
+
+    print("Batch complete")
+
+    return batch
 
 
-def initialize_plot():
-    fig = plt.figure(layout="tight", figsize=[12,9])
-    gs = GridSpec(nrows=4, ncols=12, figure=fig)
+def update_termination_position(batch, termination_pos):
+    y = numpy.mean([x[2] for x in batch])
+    y += abs(0.1*termination_pos)
 
-    axes = list()
+    print("Updating termination position from %.3f to %.3f" % (termination_pos,y))
 
-    axes.append(fig.add_subplot(gs[0,0:6]))   # 0
-    axes[-1].set_ylabel("Episode actions")
-
-    axes.append(fig.add_subplot(gs[1,0:6]))   # 1
-    axes[-1].set_ylabel("Episode states")
-
-    axes.append(fig.add_subplot(gs[2:,0:5]))  # 2
-    axes[-1].set_xlabel("Velocity")
-    axes[-1].set_ylabel("Position")
-
-    axes.append(fig.add_subplot(gs[:2,7:]))    # 3
-    axes[-1].set_xlabel("Time (s)")
-    axes[-1].set_ylabel("Max observed position")
-
-    axes.append(fig.add_subplot(gs[2:,7:]))    # 4
-    axes[-1].set_xlabel("Episode")
-    axes[-1].set_ylabel("Max observed position")
-
-    # plt.ion()
-
-    return fig,axes
+    return y
 
 
-def update_plot(fig, axes, history, e, n_steps, start_time, output_dir):
-    # Clear and re-label axes 0
-    for artist in axes[0].lines + axes[0].collections:
-        artist.remove()
+def consumer_function(rank, world_size):
+    if rank != 0:
+        exit("ERROR: Consumer rank must be 0")
 
-    for artist in axes[1].lines + axes[1].collections:
-        artist.remove()
+    initialize(rank, world_size)
 
-    axes[0].plot(history.action_episode, color="C0")
-    axes[0].relim()
+    env_name = "MountainCar-v0"
 
-    axes[1].plot([x[0] for x in history.state_episode], color="C0")
-    axes[1].plot([x[1] for x in history.state_episode], color="C1")
-    axes[1].relim()
-
-    arrayB = compute_mean(history.action_history)
-    m = axes[2].matshow(arrayB, vmin=0, vmax=2, cmap=matplotlib.colormaps["seismic"])
-    axes[2].xaxis.set_ticks_position('bottom')
-
-    # add colorbar if it doesn't exist already
-    if n_steps == 1:
-        fig.colorbar(m, ax=axes[2])
-
-    elapsed = time.time() - start_time
-
-    output_path = os.path.join(output_dir, "mountaincar_progress_%d.png" % e)
-    plt.savefig(output_path, dpi=200)
-    history.reset_action_history()
-
-
-def producer_function(id, policy, env_name, queue, max_pos, batch_size):
-    history = History()
-
+    # Initialize environment
     environment = gym.make(env_name)
 
-    categorical = Categorical2([policy.ouput_size])
+    max_pos = float(-sys.maxsize)
 
-    n_success = 0
-    n_steps = 0
+    observation_space = environment.observation_space
+    action_space = environment.action_space
+    gamma = 0.99
+    dropout_rate = 0.1
+
+    policy = Policy(state_space=observation_space, action_space=action_space, gamma=gamma, dropout_rate=dropout_rate)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4, weight_decay=1e-4)
+
+    batch_size = 8
+
+    termination_pos = -0.2
+
+    futures = dict()
+
+    while True:
+        batch = fetch_batch(model=policy, futures=futures, batch_size=batch_size, world_size=world_size, max_pos=max_pos, termination_pos=termination_pos, environment=environment)
+        update_policy(policy=policy, optimizer=optimizer, batch=batch)
+        termination_pos = update_termination_position(batch=batch, termination_pos=termination_pos)
+
+    rpc.shutdown()
+
+
+def producer_function(rank, policy,  environment, max_pos, goal_pos):
+
+    policy_episode = list()
+    reward_episode = list()
+
+    categorical = Categorical2([environment.action_space.n])
+    latest_max_pos = max_pos
+    pos = 0
 
     while True:
         state, info = environment.reset()  # Reset environment and record the starting state
-
-        truncated = True
         terminated = False
-        t = 0
 
         for t in range(400):
-            action = select_action(policy=policy, state=state, history=history, categorical=categorical)
+            action = select_action(policy=policy, state=state, categorical=categorical, policy_episode=policy_episode)
 
             state, reward, terminated, truncated, info = environment.step(action)
-            pos,velocity = state
+            pos, velocity = state
 
-            terminated = (pos > -0.2)
+            terminated = (pos > goal_pos)
 
-            history.reward_episode.append(reward)
+            reward_episode.append(reward)
 
-            if terminated or truncated:
+            if terminated:
                 break
 
         if terminated:
-            n_success += 1
-            step = (n_success % batch_size == 0)
 
-            n_steps += step
-
-            if pos > max_pos.value:
-                with max_pos.get_lock():
-                    max_pos = pos
-                    print("max_pos: %f" % pos)
-
-            queue.put(zip(history.policy_episode, history.reward_episode))
-
-        else:
-            history.reset_episode()
+            if pos > max_pos:
+                latest_max_pos = pos
+            return policy_episode, reward_episode, latest_max_pos
 
 
-def consumer_function(policy, queue, batch_size):
-    start_time = time.time()
-
-    # Hyperparameters
-    learning_rate = 1e-4
-
-    optimizer = optim.SGD(policy.parameters(), lr=learning_rate)
-
-    while True:
-        if len(queue) > batch_size:
-            update_policy(policy, optimizer, queue, batch_size)
-
-
-def select_action(policy, state, history: History, categorical: Categorical2):
+def select_action(policy, state, categorical: Categorical2, policy_episode):
     # print("ACTION SELECTION")
-
-    # print(state, type(state))
-    # print("state:", state.shape)
 
     # perform forward calculation on the environment state variables to obtain the probability of each action state
     state = torch.FloatTensor(state)
@@ -300,67 +214,27 @@ def select_action(policy, state, history: History, categorical: Categorical2):
 
     # Add log probability of our chosen action to history
     action_probability = categorical.log_prob(action)
-    history.policy_episode.append(action_probability)
-    history.action_episode.append(int(action.data.item()))
-    history.state_episode.append(state.numpy())
 
-    # print(action_probability)
-    # print()
+    policy_episode.append(action_probability)
 
     return action.item()
 
 
-def run(model_path, output_dir, n_threads):
-    # if not os.path.exists(output_dir):
-    #     os.makedirs(output_dir)
-    # else:
-    #     exit("ERROR: output dir already exists: " + output_dir)
-
-    env_name = "MountainCar-v0"
-    gamma = 0.99
-    batch_size = 16
-
-    # Initialize environment
-    environment = gym.make(env_name) #, render_mode="human")
-
-    # Access environment/agent variables
-    observation_space = environment.observation_space
-    action_space = environment.action_space
-
-    policy = Policy(action_space=action_space, state_space=observation_space, dropout_rate=0.2, gamma=gamma)
-
-    if model_path is not None:
-        policy.load_state_dict(torch.load(model_path))
-
-    policy.share_memory()
-
-    queue = mp.Queue()
-    max_pos = mp.Value(ctypes.c_double)
-    max_pos.value = 0
-
+def main():
+    n_processes = 8
     processes = list()
-    for r in range(n_threads - 1):
-        p = mp.Process(target=producer_function, args=(r, policy, env_name, queue, max_pos, batch_size))
-        p.start()
-        processes.append(p)
 
-    consumer_process = mp.Process(target=consumer_function, args=(policy, queue, batch_size))
+    for i in range(n_processes):
+        if i == 0:
+            processes.append(mp.Process(target=consumer_function, args=(i, n_processes)))
+        else:
+            processes.append(mp.Process(target=initialize, args=(i, n_processes)))
+
+        processes[-1].start()
 
     for p in processes:
         p.join()
 
-    consumer_process.join()
-
-    policy.eval()
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--model_path", type=str, required=False, default=None)
-    parser.add_argument("--output_dir", type=str, required=False, default="output/")
-    parser.add_argument("--n_threads", type=int, required=False, default=8)
-
-    args = parser.parse_args()
-
-    run(model_path=args.model_path, output_dir=args.output_dir, n_threads=args.n_threads)
+    main()
