@@ -45,7 +45,7 @@ def initialize(rank, world_size):
         "worker_" + str(rank),
         world_size=world_size,
         rank=rank,
-        rpc_backend_options=rpc.TensorPipeRpcBackendOptions(num_worker_threads=world_size, rpc_timeout=60)  # over-thread assuming most wont be used? TODO: re-examine?
+        rpc_backend_options=rpc.TensorPipeRpcBackendOptions(num_worker_threads=world_size, rpc_timeout=60, _transports=["uv"])  # over-thread assuming most wont be used? TODO: re-examine?
     )
 
     # print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
