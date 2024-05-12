@@ -29,13 +29,14 @@ import numpy as np
 
 import argparse
 
-#print(torch.__version__)
-#print(torch.distributed.is_available())
-#print(rpc.is_available())
+
+# print(torch.__version__)
+# print(torch.distributed.is_available())
+# print(rpc.is_available())
 
 
 def initialize(rank, world_size):
-    #print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
+    # print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
 
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '29500'
@@ -45,14 +46,14 @@ def initialize(rank, world_size):
         world_size=world_size,
         rank=rank)
 
-    #print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
+    # print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
 
     if rank != 0:
         rpc.shutdown()
 
 
 def update_policy(policy: Policy, optimizer, batch):
-    for policy_episode,rewards_episode,_ in batch:
+    for policy_episode, rewards_episode, _ in batch:
         R = 0
         rewards = []
 
@@ -82,10 +83,29 @@ def update_policy(policy: Policy, optimizer, batch):
     optimizer.zero_grad()
 
 
+def get_timestamp_string():
+    time = datetime.now()
+    year_to_second = [time.year, time.month, time.day, time.hour, time.second]
+    time_string = "-".join(map(str, year_to_second))
+    return time_string
+
+
+def save_model(output_directory, model, i):
+    FileManager.ensure_directory_exists(output_directory)
+    timestamp = get_timestamp_string()
+    filename = "model_" + str(i) + "_" + timestamp
+    path = os.path.join(output_directory, filename)
+    print("SAVING MODEL:", path)
+    torch.save(model.state_dict(), path)
+
+
 '''
 Fill a list with computed rollouts from environment
 '''
-def fetch_batch(model, futures, environment_name, max_pos: float, termination_pos: float, batch_size: int, world_size: int):
+
+
+def fetch_batch(model, futures, environment_name, max_pos: float, termination_pos: float, batch_size: int,
+                world_size: int):
     # Reset batch
     batch = list()
 
@@ -94,14 +114,26 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
         if i in futures:
             if not futures[i].done():
                 pass
-                #print(i, "done maybe after set result?")
+                # print(i, "done maybe after set result?")
             else:
-                futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, max_pos, termination_pos), timeout=0)
+                futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, termination_pos),
+                                           timeout=0)
         else:
-            futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, deepcopy(environment_name), max_pos, termination_pos), timeout=0)
+            futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, termination_pos),
+                                       timeout=0)
 
     # Check repeatedly for completion of async calls and relaunch any completed ones until batch is full
     done = False
+
+    """
+     P |  1    |  2     |  3     |
+    ------------------------------
+     M | 0.2  |  0.25  |  0.25  |
+    ------------------------------
+    OM | 0.23  |  0.28  |  0.28  |
+
+    """
+
     while not done:
         for i, future in futures.items():
             if not future.done():
@@ -113,29 +145,31 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
 
                 if observed_max_pos > max_pos:
                     max_pos = observed_max_pos
-                    print("Max pos is %.3f on thread %d" % (observed_max_pos, i))
+                    print("Max pos is %.3f on thread %d (higher than max)" % (observed_max_pos, i))
                 else:
-                    print("not max on thread %d" % i)
+                    print("Max pos is %.3f on thread %d " % (observed_max_pos, i))
 
                 if len(batch) < batch_size:
-                    futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, max_pos, termination_pos), timeout=0)
+                    futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, termination_pos),
+                                               timeout=0)
                 else:
                     done = True
                     break
 
+    print("Max pos is %.3f             (batch max)" % (max_pos))
     print("Batch complete")
 
-    return batch
+    return batch, max_pos
 
 
-def update_termination_position(batch, termination_pos):
+def update_termination_position(batch):
     y = numpy.mean([x[2] for x in batch])
-    y += abs(0.1*termination_pos)
+    y += abs(0.1 * y)
 
     return y
 
 
-def consumer_function(rank, world_size):
+def consumer_function(rank, world_size, output_directory, termination_pos):
     if rank != 0:
         exit("ERROR: Consumer rank must be 0")
 
@@ -160,23 +194,29 @@ def consumer_function(rank, world_size):
 
     batch_size = 16
 
-    termination_pos = -0.2
-
     futures = dict()
 
-    while True:
-        batch = fetch_batch(model=policy, futures=futures, batch_size=batch_size, world_size=world_size, max_pos=max_pos, termination_pos=termination_pos, environment_name=env_name)
-        update_policy(policy=policy, optimizer=optimizer, batch=batch)
-        termination_pos = update_termination_position(batch=batch, termination_pos=termination_pos)
+    try:
+        i = 0
+        while True:
+            batch, max_pos = fetch_batch(model=policy, futures=futures, batch_size=batch_size, world_size=world_size,
+                                         max_pos=max_pos, termination_pos=termination_pos, environment_name=env_name)
+            update_policy(policy=policy, optimizer=optimizer, batch=batch)
+            save_model(i=i, output_directory=output_directory, model=policy)
+            termination_pos = update_termination_position(batch=batch)
 
-    rpc.shutdown()
+            i += 1
+
+    except Exception as e:
+        rpc.shutdown()
+        raise e
 
 
-def producer_function(rank, policy, environment_name, max_pos, goal_pos):
+def producer_function(rank, policy, environment_name, goal_pos):
     environment = gym.make(environment_name)
     categorical = Categorical2([environment.action_space.n])
 
-    latest_max_pos = max_pos
+    observed_max_pos = -sys.maxsize
     pos = 0
 
     while True:
@@ -200,14 +240,11 @@ def producer_function(rank, policy, environment_name, max_pos, goal_pos):
                 break
 
         if terminated:
-
-            if pos > max_pos:
-                latest_max_pos = pos
-
+            if pos > observed_max_pos:
+                observed_max_pos = pos
 
             del environment
-            return policy_episode, reward_episode, latest_max_pos
-
+            return policy_episode, reward_episode, observed_max_pos
 
 
 def select_action(policy, state, categorical: Categorical2, policy_episode):
@@ -232,12 +269,15 @@ def select_action(policy, state, categorical: Categorical2, policy_episode):
     return action.item()
 
 
-def main(n_processes):
+def main(n_processes, output_dir, termination_pos):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     processes = list()
 
     for i in range(n_processes):
         if i == 0:
-            processes.append(mp.Process(target=consumer_function, args=(i, n_processes)))
+            processes.append(mp.Process(target=consumer_function, args=(i, n_processes, output_dir, termination_pos)))
         else:
             processes.append(mp.Process(target=initialize, args=(i, n_processes)))
 
@@ -251,7 +291,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--n_processes", type=int, required=False, default=8)
+    parser.add_argument("--output_dir", type=str, required=False, default="output")
+    parser.add_argument("--termination_pos", type=float, required=False, default=-0.2)
+    # parser.add_argument("--model_path", type=str, required=False, default=None)
 
     args = parser.parse_args()
 
-    main(n_processes=args.n_processes)
+    main(n_processes=args.n_processes, output_dir=args.output_dir, termination_pos=args.termination_pos)
