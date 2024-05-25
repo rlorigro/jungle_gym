@@ -44,9 +44,7 @@ def initialize(rank, world_size):
     rpc.init_rpc(
         "worker_" + str(rank),
         world_size=world_size,
-        rank=rank,
-        rpc_backend_options=rpc.TensorPipeRpcBackendOptions(num_worker_threads=world_size, rpc_timeout=60, _transports=["uv"])  # over-thread assuming most wont be used? TODO: re-examine?
-    )
+        rank=rank)
 
     # print("torch.distributed.is_initialized()", torch.distributed.is_initialized())
 
@@ -168,10 +166,12 @@ def update_termination_position(batch):
     y = numpy.mean([x[2] for x in batch])
     y += abs(0.1 * y)
 
+    y = min(0.55, y)
+
     return y
 
 
-def consumer_function(rank, world_size, output_directory, termination_pos):
+def consumer_function(rank, world_size, output_directory, termination_pos, model_path, batch_size, learning_rate):
     if rank != 0:
         exit("ERROR: Consumer rank must be 0")
 
@@ -187,14 +187,15 @@ def consumer_function(rank, world_size, output_directory, termination_pos):
     observation_space = environment.observation_space
     action_space = environment.action_space
     gamma = 0.99
-    dropout_rate = 0.1
+    dropout_rate = 0.05
 
     policy = Policy(state_space=observation_space, action_space=action_space, gamma=gamma, dropout_rate=dropout_rate)
+    if model_path is not None:
+        policy.load_state_dict(torch.load(model_path))
+        policy.eval()
     policy.share_memory()
 
-    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4, weight_decay=1e-4)
-
-    batch_size = 16
+    optimizer = torch.optim.SGD(policy.parameters(), lr=learning_rate, weight_decay=1e-4)
 
     futures = dict()
 
@@ -271,7 +272,12 @@ def select_action(policy, state, categorical: Categorical2, policy_episode):
     return action.item()
 
 
-def main(n_processes, output_dir, termination_pos):
+def train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate):
+    ##add something here to load model
+
+    if (model_path is None):
+        print("no model path provided")
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -279,7 +285,8 @@ def main(n_processes, output_dir, termination_pos):
 
     for i in range(n_processes):
         if i == 0:
-            processes.append(mp.Process(target=consumer_function, args=(i, n_processes, output_dir, termination_pos)))
+            processes.append(mp.Process(target=consumer_function, args=(
+            i, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate)))
         else:
             processes.append(mp.Process(target=initialize, args=(i, n_processes)))
 
@@ -289,14 +296,59 @@ def main(n_processes, output_dir, termination_pos):
         p.join()
 
 
+def run_model(model_path):
+    if (model_path is None):
+        print("no model path provided")
+        return
+
+    environment = gym.make("MountainCar-v0", render_mode="human")
+    observation, info = environment.reset()
+
+    observation_space = environment.observation_space
+    action_space = environment.action_space
+    gamma = 0.99
+    dropout_rate = 0.1
+
+    policy = Policy(state_space=observation_space, action_space=action_space, gamma=gamma, dropout_rate=dropout_rate)
+    policy.load_state_dict(torch.load(model_path))
+    policy.eval()
+
+    for _ in range(1000):
+        action = environment.action_space.sample()  # agent policy that uses the observation and info
+        observation, reward, terminated, truncated, info = environment.step(action)
+
+        if terminated or truncated:
+            observation, info = environment.reset()
+
+    environment.close()
+    return None
+
+
+def main(run_mode, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate):
+    if run_mode:
+        run_model(model_path)
+    else:
+        train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--n_processes", type=int, required=False, default=8)
+    parser.add_argument("--batch_size", type=int, required=False, default=8)
+    parser.add_argument("--learning_rate", type=float, required=False, default=1e-3)
     parser.add_argument("--output_dir", type=str, required=False, default="output")
     parser.add_argument("--termination_pos", type=float, required=False, default=-0.2)
-    # parser.add_argument("--model_path", type=str, required=False, default=None)
+    parser.add_argument("--run_mode", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--model_path", type=str, required=False, default=None)
 
     args = parser.parse_args()
-
-    main(n_processes=args.n_processes, output_dir=args.output_dir, termination_pos=args.termination_pos)
+    main(
+        n_processes=args.n_processes,
+        output_dir=args.output_dir,
+        termination_pos=args.termination_pos,
+        run_mode=args.run_mode,
+        model_path=args.model_path,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate
+    )
