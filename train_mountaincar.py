@@ -227,6 +227,7 @@ def producer_function(rank, policy, environment_name, goal_pos):
     while True:
         state, info = environment.reset()  # Reset environment and record the starting state
         terminated = False
+        win = True
 
         policy_episode = list()
         reward_episode = list()
@@ -238,6 +239,9 @@ def producer_function(rank, policy, environment_name, goal_pos):
             pos, velocity = state
 
             terminated = (pos > goal_pos)
+            if t>=399:
+                terminated = True
+                win = False
 
             reward_episode.append(reward)
 
@@ -249,7 +253,7 @@ def producer_function(rank, policy, environment_name, goal_pos):
                 observed_max_pos = pos
 
             del environment
-            return policy_episode, reward_episode, observed_max_pos
+            return policy_episode, reward_episode, observed_max_pos, win
 
 
 def select_action(policy, state, categorical: Categorical2, policy_episode):
@@ -344,6 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_mode", action=argparse.BooleanOptionalAction)
     parser.add_argument("--model_path", type=str, required=False, default=None)
 
+
     args = parser.parse_args()
     main(
         n_processes=args.n_processes,
@@ -352,5 +357,5 @@ if __name__ == "__main__":
         run_mode=args.run_mode,
         model_path=args.model_path,
         batch_size=args.batch_size,
-        learning_rate=args.learning_rate
+        learning_rate=args.learning_rate,
     )
