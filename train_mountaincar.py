@@ -3,6 +3,7 @@ import argparse
 import sys
 import numpy
 from copy import deepcopy
+from collections import defaultdict
 
 import ctypes
 
@@ -55,7 +56,7 @@ def initialize(rank, world_size):
 
 
 def update_policy(policy: Policy, optimizer, batch):
-    for policy_episode, rewards_episode, _ in batch:
+    for policy_episode, rewards_episode, _, __ in batch:
         R = 0
         rewards = []
 
@@ -110,6 +111,7 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
                 world_size: int):
     # Reset batch
     batch = list()
+    batch_terminations = defaultdict(int)
 
     # Launch async fn calls
     for i in range(1, world_size):
@@ -142,33 +144,48 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
                 continue
 
             else:
-                batch.append(future.value())
                 observed_max_pos = future.value()[2]
+                is_win = future.value()[-1]
+
+                if (batch_terminations[0] < batch_size // 2) and not is_win:
+                    batch.append(future.value())
+
+                if (batch_terminations[1] < batch_size // 2) and is_win:
+                    batch.append(future.value())
+
+                batch_terminations[int(is_win)] += 1
+
+                loss_done = (batch_terminations[0] >= batch_size // 2)
+                win_done = (batch_terminations[1] >= batch_size // 2)
 
                 if observed_max_pos > max_pos:
                     max_pos = observed_max_pos
                     print("Max pos is %.3f on thread %d (higher than max)" % (observed_max_pos, i))
-                else:
-                    print("Max pos is %.3f on thread %d " % (observed_max_pos, i))
+                # else:
+                #     print("Max pos is %.3f on thread %d " % (observed_max_pos, i))
 
-                if len(batch) < batch_size:
-                    futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, termination_pos),
-                                               timeout=0)
+                if not win_done or not loss_done:
+                    futures[i] = rpc.rpc_async(i, producer_function, args=(i, model, environment_name, termination_pos),timeout=0)
                 else:
                     done = True
                     break
 
+    print("losses: ", batch_terminations[0], "wins: ", batch_terminations[1])
     print("Max pos is %.3f             (batch max)" % (max_pos))
     print("Batch complete")
 
     return batch, max_pos
 
 
-def update_termination_position(batch):
+def update_termination_position(batch, prev):
     y = numpy.mean([x[2] for x in batch])
-    y += abs(0.1 * y)
+    print("Average pos: ", y)
 
-    y = min(0.55, y)
+    if y > prev:
+        y += abs(0.1 * y)
+        y = min(0.55, y)
+
+        print("updating termination_pos: ", y)
 
     return y
 
@@ -208,7 +225,9 @@ def consumer_function(rank, world_size, output_directory, termination_pos, model
                                          max_pos=max_pos, termination_pos=termination_pos, environment_name=env_name)
             update_policy(policy=policy, optimizer=optimizer, batch=batch)
             save_model(i=i, output_directory=output_directory, model=policy)
-            termination_pos = update_termination_position(batch=batch)
+
+            # Update only if average exceeds the current goal by some delta
+            termination_pos = update_termination_position(batch=batch, prev=termination_pos)
 
             i += 1
 
@@ -248,7 +267,7 @@ def producer_function(rank, policy, environment_name, goal_pos):
             if terminated:
                 break
 
-        if terminated:
+        if terminated and t > 5:
             if pos > observed_max_pos:
                 observed_max_pos = pos
 
@@ -331,6 +350,9 @@ def run_model(model_path):
 
 
 def main(run_mode, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate):
+    if batch_size % 2 != 0:
+        raise Exception("ERROR: only even batch sizes are accepted")
+
     if run_mode:
         run_model(model_path)
     else:
