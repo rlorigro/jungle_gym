@@ -222,8 +222,15 @@ def consumer_function(rank, world_size, output_directory, termination_pos, model
     try:
         i = 0
         while True:
-            batch, max_pos = fetch_batch(model=policy, futures=futures, batch_size=batch_size, world_size=world_size,
-                                         max_pos=max_pos, termination_pos=termination_pos, environment_name=env_name)
+            batch, max_pos = fetch_batch(
+                model=policy,
+                futures=futures,
+                batch_size=batch_size,
+                world_size=world_size,
+                max_pos=max_pos,
+                termination_pos=termination_pos,
+                environment_name=env_name)
+
             update_policy(policy=policy, optimizer=optimizer, batch=batch)
             save_model(i=i, output_directory=output_directory, model=policy)
 
