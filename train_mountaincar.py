@@ -186,8 +186,9 @@ def update_termination_position(batch, prev):
         y = min(0.55, y)
 
         print("updating termination_pos: ", y)
-
-    return y
+        return y
+    else:
+        return prev
 
 
 def consumer_function(rank, world_size, output_directory, termination_pos, model_path, batch_size, learning_rate):
