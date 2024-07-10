@@ -177,16 +177,14 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
     return batch, max_pos
 
 
-def update_termination_position(batch, prev):
-    y = numpy.mean([x[2] for x in batch])
-    print("Average pos: ", y)
+def update_termination_position(batch, prev, win_count, loss_count):
+    z = numpy.mean([x[2] for x in batch])
+    print("Average pos: ", z)
 
-    if y > prev:
-        y += abs(0.1 * y)
-        y = min(0.55, y)
-
-        print("updating termination_pos: ", y)
-        return y
+    if float(win_count)/float(loss_count) > 0.5:
+            y = min(0.55, abs(1.1 * prev))
+            print("updating termination_pos: ", y)
+            return y
     else:
         return prev
 
