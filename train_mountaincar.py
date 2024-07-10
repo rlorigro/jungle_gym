@@ -180,19 +180,22 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
     return batch, max_pos, wins, losses
 
 
-def update_termination_position(batch, prev, win_count, loss_count):
+def update_termination_position(batch, prev, win_count, loss_count,win_thresh):
     z = numpy.mean([x[2] for x in batch])
     print("Average pos: ", z)
 
-    if float(win_count)/float(loss_count) > 0.5:
-            y = min(0.55, abs(1.1 * prev))
+    if float(win_count)/float(loss_count) > win_thresh or z>prev:
+            if z>prev:
+                y = min(0.55, abs(1.1 * z))
+            else:
+                y = min(0.55, abs(1.1 * prev))
             print("updating termination_pos: ", y)
             return y
     else:
         return prev
 
 
-def consumer_function(rank, world_size, output_directory, termination_pos, model_path, batch_size, learning_rate):
+def consumer_function(rank, world_size, output_directory, termination_pos, model_path, batch_size, learning_rate, win_thresh):
     if rank != 0:
         exit("ERROR: Consumer rank must be 0")
 
@@ -236,7 +239,7 @@ def consumer_function(rank, world_size, output_directory, termination_pos, model
             save_model(i=i, output_directory=output_directory, model=policy)
 
             # Update only if average exceeds the current goal by some delta
-            termination_pos = update_termination_position(batch=batch, prev=termination_pos, win_count=win_count, loss_count=loss_count)
+            termination_pos = update_termination_position(batch=batch, prev=termination_pos, win_count=win_count, loss_count=loss_count, win_thresh=win_thresh)
 
             i += 1
 
@@ -306,7 +309,7 @@ def select_action(policy, state, categorical: Categorical2, policy_episode):
     return action.item()
 
 
-def train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate):
+def train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate,win_thresh):
     ##add something here to load model
 
     if (model_path is None):
@@ -320,7 +323,7 @@ def train_model(n_processes, output_dir, termination_pos, model_path, batch_size
     for i in range(n_processes):
         if i == 0:
             processes.append(mp.Process(target=consumer_function, args=(
-            i, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate)))
+            i, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate, win_thresh)))
         else:
             processes.append(mp.Process(target=initialize, args=(i, n_processes)))
 
@@ -358,14 +361,14 @@ def run_model(model_path):
     return None
 
 
-def main(run_mode, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate):
+def main(run_mode, n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate,win_thresh):
     if batch_size % 2 != 0:
         raise Exception("ERROR: only even batch sizes are accepted")
 
     if run_mode:
         run_model(model_path)
     else:
-        train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate)
+        train_model(n_processes, output_dir, termination_pos, model_path, batch_size, learning_rate, win_thresh)
 
 
 if __name__ == "__main__":
@@ -378,6 +381,7 @@ if __name__ == "__main__":
     parser.add_argument("--termination_pos", type=float, required=False, default=-0.2)
     parser.add_argument("--run_mode", action=argparse.BooleanOptionalAction)
     parser.add_argument("--model_path", type=str, required=False, default=None)
+    parser.add_argument("--win_thresh", type=float, required=False, default=0.2)
 
 
     args = parser.parse_args()
@@ -389,4 +393,5 @@ if __name__ == "__main__":
         model_path=args.model_path,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        win_thresh=args.win_thresh
     )
