@@ -174,7 +174,10 @@ def fetch_batch(model, futures, environment_name, max_pos: float, termination_po
     print("Max pos is %.3f             (batch max)" % (max_pos))
     print("Batch complete")
 
-    return batch, max_pos
+    wins = batch_terminations[1]
+    losses = batch_terminations[0]
+
+    return batch, max_pos, wins, losses
 
 
 def update_termination_position(batch, prev, win_count, loss_count):
@@ -220,7 +223,7 @@ def consumer_function(rank, world_size, output_directory, termination_pos, model
     try:
         i = 0
         while True:
-            batch, max_pos = fetch_batch(
+            batch, max_pos, win_count, loss_count = fetch_batch(
                 model=policy,
                 futures=futures,
                 batch_size=batch_size,
@@ -233,7 +236,7 @@ def consumer_function(rank, world_size, output_directory, termination_pos, model
             save_model(i=i, output_directory=output_directory, model=policy)
 
             # Update only if average exceeds the current goal by some delta
-            termination_pos = update_termination_position(batch=batch, prev=termination_pos)
+            termination_pos = update_termination_position(batch=batch, prev=termination_pos, win_count=win_count, loss_count=loss_count)
 
             i += 1
 
